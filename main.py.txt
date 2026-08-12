@@ -1,0 +1,136 @@
+"""
+Animal / Unknown Person Detector + Email Alert
+------------------------------------------------
+Fetches photos from your ESP32-CAM, runs them through a pre-trained
+YOLO object-detection model (no training needed), and emails you an
+alert with the photo attached whenever a person or animal is seen.
+
+SETUP (one time):
+  1. pip install -r requirements.txt
+  2. Fill in the CONFIG section below (ESP32 IP, Gmail address, Gmail App Password)
+  3. Run:  python detect_and_alert.py
+  4. Leave it running in the background (same WiFi as the ESP32-CAM)
+"""
+
+import time
+from datetime import datetime
+
+import cv2
+import numpy as np
+import requests
+from ultralytics import YOLO
+
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
+
+# ============================================================
+# CONFIG - edit these values
+# ============================================================
+ESP32_CAM_URL = "http://10.135.___.___:__/capture"  # <-- your ESP32-CAM IP
+
+CHECK_INTERVAL_SECONDS = 5     # how often to check for a new photo
+ALERT_COOLDOWN_SECONDS = 120   # don't send another email for 2 min after one is sent
+
+SENDER_EMAIL = "............."        # <-- Gmail address to SEND from
+SENDER_APP_PASSWORD = "... ... ... ..."  # <-- Gmail App Password (NOT your normal password)
+RECEIVER_EMAIL = ".............."      # <-- where alerts should be sent (can be same as sender)
+
+# Detected object labels that should trigger an alert (from the COCO dataset,
+# which the pre-trained model already knows - no training required)
+ANIMAL_CLASSES = {"cat", "dog", "horse", "sheep", "cow", "elephant",
+                   "bear", "zebra", "giraffe", "bird"}
+PERSON_CLASS = "person"
+TARGET_CLASSES = ANIMAL_CLASSES | {PERSON_CLASS}
+
+CONFIDENCE_THRESHOLD = 0.5  # 0.0-1.0, higher = fewer false alarms but may miss some
+# ============================================================
+
+
+def load_model():
+    print("Loading detection model (first run downloads it automatically)...")
+    return YOLO("yolov8n.pt")
+
+
+def fetch_frame():
+    try:
+        resp = requests.get(ESP32_CAM_URL, timeout=5)
+        if resp.status_code == 200:
+            img_array = np.frombuffer(resp.content, dtype=np.uint8)
+            frame = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+            return frame
+        print(f"Camera returned status {resp.status_code}")
+    except Exception as e:
+        print("Could not reach ESP32-CAM:", e)
+    return None
+
+
+def send_email_alert(frame, detected_label):
+    filename = f"alert_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+    cv2.imwrite(filename, frame)
+
+    msg = MIMEMultipart()
+    msg["From"] = SENDER_EMAIL
+    msg["To"] = RECEIVER_EMAIL
+    msg["Subject"] = f"Alert: {detected_label} detected"
+
+    body = (f"A '{detected_label}' was detected by your ESP32-CAM at "
+            f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}.")
+    msg.attach(MIMEText(body, "plain"))
+
+    with open(filename, "rb") as f:
+        part = MIMEBase("application", "octet-stream")
+        part.set_payload(f.read())
+    encoders.encode_base64(part)
+    part.add_header("Content-Disposition", f"attachment; filename={filename}")
+    msg.attach(part)
+
+    try:
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login(SENDER_EMAIL, SENDER_APP_PASSWORD)
+        server.send_message(msg)
+        server.quit()
+        print(f"Email sent: {detected_label}")
+    except Exception as e:
+        print("Email send failed:", e)
+
+
+def main():
+    model = load_model()
+    last_alert_time = 0
+    print("Watching for animals / people... (Ctrl+C to stop)")
+
+    while True:
+        frame = fetch_frame()
+
+        if frame is not None:
+            results = model(frame, verbose=False)
+            detected_labels = set()
+
+            for r in results:
+                for box in r.boxes:
+                    conf = float(box.conf[0])
+                    if conf < CONFIDENCE_THRESHOLD:
+                        continue
+                    label = model.names[int(box.cls[0])]
+                    if label in TARGET_CLASSES:
+                        detected_labels.add(label)
+
+            if detected_labels:
+                now = time.time()
+                if now - last_alert_time > ALERT_COOLDOWN_SECONDS:
+                    label_str = ", ".join(sorted(detected_labels))
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] Detected: {label_str}")
+                    send_email_alert(frame, label_str)
+                    last_alert_time = now
+                else:
+                    print(f"Detected {detected_labels} but still in cooldown, skipping email.")
+
+        time.sleep(CHECK_INTERVAL_SECONDS)
+
+
+if __name__ == "__main__":
+    main()
