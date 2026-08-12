@@ -1,0 +1,28 @@
+# Captured photos from the detection script (local runtime output, not source code)
+alert_*.jpg
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# YOLO model weights (auto-downloaded on first run, no need to store in repo)
+*.pt
+
+# Arduino IDE build files
+*.bin
+build/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor configs
+.vscode/
+.idea/
+
+# NEVER commit real credentials — keep these as placeholders in tracked files
+# (WiFi password, Blynk Auth Token, Gmail App Password, etc.)
+secrets.h
+.env
